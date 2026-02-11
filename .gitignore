@@ -1,0 +1,16 @@
+# secrets
+.env
+**/.env
+**/.env.*
+
+# Node / Next
+**/node_modules/
+**/.next/
+**/out/
+
+# PHP / Laravel
+**/vendor/
+**/storage/logs/
+**/storage/framework/cache/
+**/storage/framework/sessions/
+**/storage/framework/views/
