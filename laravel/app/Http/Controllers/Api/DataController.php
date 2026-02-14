@@ -96,7 +96,11 @@ class DataController extends Controller
             $pointName = '';
         }
         try {
-            $ok = insertDataUser($pdo, $userId, $userLat, $userLng, $userAlt, $userAcc, $userAltAcc, $userStl, $userVol, $timeId, $pointType, $pointName);
+            if ($pointType == 1 || $pointType == 2) {
+              $ok = insertDataPoint($pdo, $userId, $userLat, $userLng, $userAlt, $userAcc, $userAltAcc, $userStl, $userVol, $timeId, $pointType, $pointName);
+            } else {
+              $ok = insertDataUser($pdo, $userId, $userLat, $userLng, $userAlt, $userAcc, $userAltAcc, $userStl, $userVol, $timeId);
+            }
             if (!$ok) {
                 return response()->json(
                     ['status' => 'error', 'error' => '対象が見つかりません（権限/ID）'],

@@ -4,8 +4,13 @@ function insertData(PDO $pdo, string $source, string $lat, string $lng, string $
     $stmt->execute([$source, $lat, $lng, $alt, $stl, $voltage, $timestr]);
     return $stmt->rowCount() > 0; // 0なら対象なし
 }
-function insertDataUser(PDO $pdo, int $userid, string $lat, string $lng, string $alt, string $acc, string $altacc, string $stl, string $voltage, string $timestr, int $pointid, string $pointname): bool {
-    $stmt = $pdo->prepare("INSERT INTO location_info_user (user_id, lat, lng, alt, acc, alt_acc, stl, vol, time_id, point_id, point_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+function insertDataUser(PDO $pdo, int $userid, string $lat, string $lng, string $alt, string $acc, string $altacc, string $stl, string $voltage, string $timestr): bool {
+    $stmt = $pdo->prepare("INSERT INTO location_info_user (user_id, lat, lng, alt, acc, alt_acc, stl, vol, time_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([$userid, $lat, $lng, $alt, $acc, $altacc, $stl, $voltage, $timestr]);
+    return $stmt->rowCount() > 0; // 0なら対象なし
+}
+function insertDataPoint(PDO $pdo, int $userid, string $lat, string $lng, string $alt, string $acc, string $altacc, string $stl, string $voltage, string $timestr, int $pointid, string $pointname): bool {
+    $stmt = $pdo->prepare("INSERT INTO location_info_point (user_id, lat, lng, alt, acc, alt_acc, stl, vol, time_id, point_id, point_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     $stmt->execute([$userid, $lat, $lng, $alt, $acc, $altacc, $stl, $voltage, $timestr, $pointid, $pointname]);
     return $stmt->rowCount() > 0; // 0なら対象なし
 }
@@ -22,9 +27,9 @@ function selectData(PDO $pdo, int $userId, int $groupId): ?array {
                              ) A ON L.model_number = A.model_number
                   WHERE L.is_deleted = 0
                  UNION ALL
-                  SELECT (CASE WHEN LU.point_id = 1 THEN 4 WHEN LU.point_id = 2 THEN 5 ELSE A.job END) AS jobflag, 
+                  SELECT  A.job AS jobflag, 
                           LU.user_id, A.username, '' AS model_number, LU.lat, LU.lng, LU.alt, LU.acc, LU.alt_acc, LU.stl, LU.time_id, LU.created_at,
-                          ROW_NUMBER() OVER (PARTITION BY LU.user_id ORDER BY LU.created_at DESC) AS rn, LU.point_name, LU.id AS data_id
+                          ROW_NUMBER() OVER (PARTITION BY LU.user_id ORDER BY LU.created_at DESC) AS rn, '' AS point_name, LU.id AS data_id
                   FROM location_info_user LU
                   INNER JOIN (SELECT U.id, U.username, G.job
                               FROM team_details G
@@ -36,7 +41,7 @@ function selectData(PDO $pdo, int $userId, int $groupId): ?array {
                   SELECT (CASE WHEN LU.point_id = 1 THEN 4 WHEN LU.point_id = 2 THEN 5 ELSE A.job END) AS jobflag, 
                           LU.user_id, A.username, '' AS model_number, LU.lat, LU.lng, LU.alt, LU.acc, LU.alt_acc, LU.stl, LU.time_id, LU.created_at,
                           ROW_NUMBER() OVER (PARTITION BY LU.id, LU.point_name ORDER BY LU.created_at DESC) AS rn, LU.point_name, LU.id AS data_id
-                  FROM location_info_user LU
+                  FROM location_info_point LU
                   INNER JOIN (SELECT U.id, U.username, G.job
                               FROM team_details G
                                    INNER JOIN users U ON G.subject_id = U.id
@@ -56,7 +61,7 @@ function selectDataPoint(PDO $pdo, int $userId): ?array {
                              lat, lng, alt, acc, alt_acc, time_id,
                              CASE WHEN point_id = 1 THEN 4 ELSE 5 END AS status_flag,
                              point_name, id AS data_id
-                           FROM location_info_user
+                           FROM location_info_point
                            WHERE is_deleted = 0
                              AND user_id = :userid
                              AND point_id IN (1, 2)
@@ -128,7 +133,7 @@ function selectDataTrajectory(PDO $pdo, int $userId, string $selectDate, int $se
                                LU.time_id,
                                CAST(LU.time_id AS UNSIGNED) AS intTime_id,
                                LU.created_at,
-                               LU.point_name,
+                               '' AS point_name,
                                LU.id AS data_id
                              FROM location_info_user LU
                              JOIN users U ON U.id = LU.user_id
@@ -174,7 +179,7 @@ function selectDataTrajectory(PDO $pdo, int $userId, string $selectDate, int $se
 //待ち場
 function selectDataBa(PDO $pdo, int $userId): ?array {
     $stmt = $pdo->prepare("SELECT LU.id, LU.point_name
-                           FROM location_info_user LU
+                           FROM location_info_point LU
                            INNER JOIN (SELECT U.id, U.username
                                        FROM users U
                                        WHERE U.id = :userid
@@ -188,7 +193,7 @@ function selectDataBa(PDO $pdo, int $userId): ?array {
 //車
 function selectDataCar(PDO $pdo, int $userId): ?array {
     $stmt = $pdo->prepare("SELECT LU.id, LU.point_name
-                           FROM location_info_user LU
+                           FROM location_info_point LU
                            INNER JOIN (SELECT U.id, U.username
                                        FROM users U
                                        WHERE U.id = :userid
@@ -201,7 +206,7 @@ function selectDataCar(PDO $pdo, int $userId): ?array {
 }
 //ポイント名変更
 function pointRename(PDO $pdo, int $userId, int $pointId, string $name): bool {
-  $sql = "UPDATE location_info_user
+  $sql = "UPDATE location_info_point
           SET point_name = :pname, updated_at = NOW()
           WHERE id = :id AND user_id = :userid AND is_deleted = 0";
   $st = $pdo->prepare($sql);
@@ -211,7 +216,7 @@ function pointRename(PDO $pdo, int $userId, int $pointId, string $name): bool {
 //ポイント削除
 function pointDelete(PDO $pdo, int $userId, int $pointId): bool {
     $st = $pdo->prepare(
-        "UPDATE location_info_user
+        "UPDATE location_info_point
          SET is_deleted = 1, updated_at = NOW()
          WHERE is_deleted = 0
            AND id = :pid
