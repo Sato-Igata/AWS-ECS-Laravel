@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Services\DynamoDb\LocationInfoTable;
+use App\Services\DynamoDb\LocationInfoUserTable;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -10,7 +12,7 @@ use Illuminate\Support\Facades\Cookie;
 
 class DataController extends Controller
 {
-    public function userLocationInformation(Request $request)
+    public function userLocationInformation(Request $request, LocationInfoUserTable $table)
     {
         // ① セッションログイン確認（userId確認）
         $userId = Auth::id();
@@ -98,20 +100,34 @@ class DataController extends Controller
         try {
             if ($pointType == 1 || $pointType == 2) {
               $ok = insertDataPoint($pdo, $userId, $userLat, $userLng, $userAlt, $userAcc, $userAltAcc, $userStl, $userVol, $timeId, $pointType, $pointName);
+              if (!$ok) {
+                  return response()->json(
+                      ['status' => 'error', 'error' => '対象が見つかりません（権限/ID）'],
+                      404,
+                      [],
+                      JSON_UNESCAPED_UNICODE
+                  );
+              }
+              return response()->json([
+                  'status' => 'success',
+              ], 200, [], JSON_UNESCAPED_UNICODE);
             } else {
-              $ok = insertDataUser($pdo, $userId, $userLat, $userLng, $userAlt, $userAcc, $userAltAcc, $userStl, $userVol, $timeId);
+              $table->putLocation([
+                'user_id'      => (string)$userId,
+                'time_id'      => $timeId,
+                'lat'          => $userLat,
+                'lng'          => $userLng,
+                'alt'          => $userAlt,
+                'acc'          => $userAcc,
+                'alt_acc'      => $userAltAcc,
+                'stl'          => $userStl,
+                'vol'          => $userVol,
+              ]);
+              return response()->json([
+                  'status' => 'success',
+              ], 200, [], JSON_UNESCAPED_UNICODE);
+              //   $ok = insertDataUser($pdo, $userId, $userLat, $userLng, $userAlt, $userAcc, $userAltAcc, $userStl, $userVol, $timeId);
             }
-            if (!$ok) {
-                return response()->json(
-                    ['status' => 'error', 'error' => '対象が見つかりません（権限/ID）'],
-                    404,
-                    [],
-                    JSON_UNESCAPED_UNICODE
-                );
-            }
-            return response()->json([
-                'status' => 'success',
-            ], 200, [], JSON_UNESCAPED_UNICODE);
         } catch (\Throwable $e) {
             \Log::error('groupCreate failed', ['e' => $e->getMessage()]);
             return response()->json(['status'=>'error','error'=>'サーバーエラーが発生しました'], 500);
@@ -443,8 +459,11 @@ class DataController extends Controller
         }
     }
 
-    public function getdata(Request $request)
-    {
+    public function getdata(
+        Request $request,
+        LocationInfoTable $deviceTable,
+        LocationInfoUserTable $userTable
+    ) {
         // ① セッションログイン確認（userId確認）
         $userId = Auth::id();
         if (!$userId) {
@@ -515,7 +534,8 @@ class DataController extends Controller
         $mapflag = (int)($validated['flag'] ?? 0);
         try {
             if ($mapflag === 1) {
-                $results = selectData($pdo, $userId, $groupId);
+                // $results = selectData($pdo, $userId, $groupId);
+                $results = selectDataDynamo($pdo, $deviceTable, $userTable, $userId, $groupId);
             } elseif ($mapflag === 2) {
                 $results = selectDataPoint($pdo, $userId);
             } else {

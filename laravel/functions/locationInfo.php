@@ -1,4 +1,7 @@
 <?php
+use App\Services\DynamoDb\LocationInfoTable;
+use App\Services\DynamoDb\LocationInfoUserTable;
+
 function insertData(PDO $pdo, string $source, string $lat, string $lng, string $alt, string $stl, string $voltage, string $timestr): bool {
     $stmt = $pdo->prepare("INSERT INTO location_info (model_number, lat, lng, alt, stl, vol, time_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
     $stmt->execute([$source, $lat, $lng, $alt, $stl, $voltage, $timestr]);
@@ -224,5 +227,165 @@ function pointDelete(PDO $pdo, int $userId, int $pointId): bool {
     );
     $st->execute([':userid' => $userId, ':pid' => $pointId]);
     return $st->rowCount() > 0; // 0なら対象なし
+}
+
+
+
+function selectDataDynamo(
+    PDO $pdo,
+    LocationInfoTable $deviceTable,        // location_info (model_number)
+    LocationInfoUserTable $userTable,      // location_info_user (user_id)
+    int $userId,
+    int $groupId
+): array {
+
+    // A) MySQLで「対象一覧」を取る（元SQLのJOIN部分だけ）
+    // job=3（デバイス）
+    $stmt = $pdo->prepare("
+        SELECT P.user_id, P.model_number, G.job
+        FROM team_details G
+        INNER JOIN products P ON G.subject_id = P.id
+        WHERE G.team_id = ?
+          AND G.participation = 1 AND G.approval = 1
+          AND G.job = 3 AND G.is_deleted = 0
+    ");
+    $stmt->execute([$groupId]);
+    $devices = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // job<>3（ユーザー）
+    $stmt = $pdo->prepare("
+        SELECT U.id AS user_id, U.username, G.job
+        FROM team_details G
+        INNER JOIN users U ON G.subject_id = U.id
+        WHERE G.team_id = ?
+          AND G.participation = 1 AND G.approval = 1
+          AND G.job <> 3 AND G.is_deleted = 0
+    ");
+    $stmt->execute([$groupId]);
+    $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $modelNumbers = array_values(array_unique(array_map(fn($r)=> (string)$r['model_number'], $devices)));
+    $userIds      = array_values(array_unique(array_map(fn($r)=> (string)$r['user_id'], $users)));
+
+    // B) DynamoDBで「最新(LATEST)」を一括取得
+    // ※ LocationInfoTable / LocationInfoUserTable 側で LATEST を保存している前提
+    $ddbDeviceRaw = $deviceTable->batchGetLatestByModel($modelNumbers);   // Items (typed)
+    $ddbUserRaw   = $userTable->batchGetLatestByUser($userIds);          // Items (typed)
+
+    // 取り回ししやすい Map にする
+    $latestByModel = [];
+    foreach ($ddbDeviceRaw as $it) {
+        $u = ddb_unwrap($it);
+        if (!empty($u['model_number'])) $latestByModel[$u['model_number']] = $u;
+    }
+
+    $latestByUser = [];
+    foreach ($ddbUserRaw as $it) {
+        $u = ddb_unwrap($it);
+        // user_id は N で入ってるので文字列化してキーに
+        if (isset($u['user_id'])) $latestByUser[(string)$u['user_id']] = $u;
+    }
+
+    // C) point（待ち場/車）は MySQLで最新を取る（今のSQLの3つ目UNION相当）
+    $stmt = $pdo->prepare("
+        SELECT (CASE WHEN LU.point_id = 1 THEN 4 WHEN LU.point_id = 2 THEN 5 ELSE A.job END) AS jobflag,
+               LU.user_id, A.username, LU.lat, LU.lng, LU.alt, LU.acc, LU.alt_acc, LU.stl, LU.time_id, LU.created_at,
+               LU.point_name, LU.id AS data_id
+        FROM (
+          SELECT LU.*,
+                 ROW_NUMBER() OVER (PARTITION BY LU.user_id, LU.point_name ORDER BY LU.created_at DESC) AS rn
+          FROM location_info_point LU
+          WHERE LU.is_deleted = 0 AND LU.point_id <> '' AND LU.point_id IS NOT NULL
+        ) LU
+        INNER JOIN (
+          SELECT U.id, U.username, G.job
+          FROM team_details G
+          INNER JOIN users U ON G.subject_id = U.id
+          WHERE G.team_id = ? AND G.participation = 1 AND approval = 1 AND G.job <> 3 AND G.is_deleted = 0
+        ) A ON LU.user_id = A.id
+        WHERE LU.rn = 1
+    ");
+    $stmt->execute([$groupId]);
+    $points = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // D) マージして「元のSELECT結果と同じ形」に整形
+    $results = [];
+
+    // デバイス（job=3）
+    foreach ($devices as $d) {
+        $model = (string)$d['model_number'];
+        $job   = (int)$d['job'];
+        $loc   = $latestByModel[$model] ?? null;
+        if (!$loc) continue;
+
+        $timeId = (string)($loc['time_id'] ?? '');
+        $results[] = [
+            'user_id'      => (int)$d['user_id'],
+            'username'     => '',
+            'model_number' => $model,
+            'lat'          => (string)($loc['lat'] ?? ''),
+            'lng'          => (string)($loc['lng'] ?? ''),
+            'alt'          => (string)($loc['alt'] ?? ''),
+            'acc'          => '',
+            'alt_acc'      => '',
+            'time_id'      => $timeId,
+            'status_flag'  => $job,
+            'point_name'   => '',
+            'data_id'      => $timeId,   // DynamoDBにAUTO_INCREMENTが無いので代替（time_idをdata_id相当として返す）
+            '_sort'        => $timeId,   // ソート用
+        ];
+    }
+
+    // ユーザー（job<>3）
+    foreach ($users as $u) {
+        $uid  = (string)$u['user_id'];
+        $job  = (int)$u['job'];
+        $loc  = $latestByUser[$uid] ?? null;
+        if (!$loc) continue;
+
+        $timeId = (string)($loc['time_id'] ?? '');
+        $results[] = [
+            'user_id'      => (int)$uid,
+            'username'     => (string)$u['username'],
+            'model_number' => '',
+            'lat'          => (string)($loc['lat'] ?? ''),
+            'lng'          => (string)($loc['lng'] ?? ''),
+            'alt'          => (string)($loc['alt'] ?? ''),
+            'acc'          => (string)($loc['acc'] ?? ''),
+            'alt_acc'      => (string)($loc['alt_acc'] ?? ''),
+            'time_id'      => $timeId,
+            'status_flag'  => $job,
+            'point_name'   => '',
+            'data_id'      => $timeId,
+            '_sort'        => $timeId,
+        ];
+    }
+
+    // point（待ち場/車）
+    foreach ($points as $p) {
+        $results[] = [
+            'user_id'      => (int)$p['user_id'],
+            'username'     => (string)$p['username'],
+            'model_number' => '',
+            'lat'          => (string)$p['lat'],
+            'lng'          => (string)$p['lng'],
+            'alt'          => (string)$p['alt'],
+            'acc'          => (string)$p['acc'],
+            'alt_acc'      => (string)$p['alt_acc'],
+            'time_id'      => (string)$p['time_id'],
+            'status_flag'  => (int)$p['jobflag'],
+            'point_name'   => (string)$p['point_name'],
+            'data_id'      => (int)$p['data_id'],
+            '_sort'        => (string)$p['time_id'], // created_atでやりたいならcreated_atを使う
+        ];
+    }
+
+    // E) ORDER BY created_at DESC 相当 → time_id（YYYYMMDDHHMMSS）で降順
+    usort($results, fn($a,$b) => strcmp($b['_sort'], $a['_sort']));
+
+    // ソート用キーは消す
+    foreach ($results as &$r) unset($r['_sort']);
+
+    return $results;
 }
 ?>
